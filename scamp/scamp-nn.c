@@ -456,16 +456,15 @@ void biff_nn_send(uint data)
 //------------------------------------------------------------------------------
 
 // Transmit our current best guess of coordinates to all neighbouring chips
-void p2pc_addr_nn_send(uint arg1, uint arg2)
+void p2pc_addr_nn_send(int guess_x, int guess_y)
 {
     // Don't send anything if our address is actually unknown...
-    if (p2p_addr_guess_x == NO_IDEA || p2p_addr_guess_y == NO_IDEA) {
+    if (guess_x == NO_IDEA || guess_y == NO_IDEA) {
 	return;
     }
 
     uint key = (NN_CMD_P2PC << 24) | (P2PC_ADDR << 2);
-    uint data = ((p2p_addr_guess_x & 0xFFFF) << 16) |
-	    (p2p_addr_guess_y & 0xFFFF);
+    uint data = ((guess_x & 0xFFFF) << 16) | (guess_y & 0xFFFF);
 
     key |= chksum_64(key, data);
 
@@ -475,7 +474,8 @@ void p2pc_addr_nn_send(uint arg1, uint arg2)
 }
 
 // Broadcast the existance of a new P2P coordinate having been discovered
-void p2pc_new_nn_send(uint x, uint y)
+// skip the incoming link, if any
+void p2pc_new_nn_send(uint inlink, uint x, uint y)
 {
     uint key = (NN_CMD_P2PC << 24) | (P2PC_NEW << 2);
     uint data = ((x & 0xFFFF) << 16) | (y & 0xFFFF);
@@ -483,18 +483,20 @@ void p2pc_new_nn_send(uint x, uint y)
     key |= chksum_64(key, data);
 
     for (uint link = 0; link < NUM_LINKS; link++) {
-	pkt_tx(PKT_NN + PKT_PL + (link << 18), data, key);
+        if (link != inlink) {
+	    pkt_tx(PKT_NN + PKT_PL + (link << 18), data, key);
+	}
     }
 }
 
-// Transmit our current best guess of coordinates to all neighbouring chips.
-void p2pc_dims_nn_send(uint arg1, uint arg2)
+// Transmit our current best guess of dimensions to all neighbouring chips.
+void p2pc_dims_nn_send(int min_x, int min_y, int max_x, int max_y)
 {
     uint key = (NN_CMD_P2PC << 24) | (P2PC_DIMS << 2);
-    uint data = ((p2p_min_x & 0xFF) << 24) |
-	    ((p2p_min_y & 0xFF) << 16) |
-	    ((p2p_max_x & 0xFF) << 8) |
-	    ((p2p_max_y & 0xFF) << 0);
+    uint data = ((min_x & 0xFF) << 24) |
+	    ((min_y & 0xFF) << 16) |
+	    ((max_x & 0xFF) << 8) |
+	    ((max_y & 0xFF) << 0);
 
     key |= chksum_64(key, data);
 
@@ -566,10 +568,10 @@ void nn_rcv_p2pc_addr_pct(uint link, uint data, uint key)
 	updated |= 2;
     }
 
-    // If guess was updated, broadcast this fact
+    // If guess was updated, broadcast this fact to ALL links
     if (updated) {
 	ticks_since_last_p2pc_new = 0;
-	p2pc_new_nn_send(p2p_addr_guess_x, p2p_addr_guess_y);
+	p2pc_new_nn_send(NUM_LINKS, p2p_addr_guess_x, p2p_addr_guess_y);
     }
 }
 
@@ -597,12 +599,12 @@ void nn_rcv_p2pc_new_pct(uint link, uint data, uint key)
     uint bit_offset = (((x + 256) << 9) | ((y + 256) << 0));
     uchar byte = p2p_addr_table[bit_offset / 8];
     uchar new_byte = byte | (1 << (bit_offset % 8));
-    p2p_addr_table[bit_offset / 8] = new_byte;
 
-    // Re-broadcast only newly discovered coordinates
+    // update and re-broadcast only newly discovered coordinates
     if (byte != new_byte) {
+        p2p_addr_table[bit_offset / 8] = new_byte;
 	ticks_since_last_p2pc_new = 0;
-	p2pc_new_nn_send(x, y);
+	p2pc_new_nn_send(link, x, y);
     }
 }
 
@@ -641,11 +643,9 @@ void nn_rcv_p2pc_dims_pct(uint link, uint data, uint key)
 	changed = 1;
     }
 
-    // Re-broadcast immediately if bounds expanded to minimise propagation
-    // delay
+    // if dimensions updated restart tick counter
     if (changed) {
 	ticks_since_last_p2pc_dims = 0;
-	p2pc_dims_nn_send(0, 0);
     }
 }
 
@@ -1075,11 +1075,15 @@ void nn_cmd_biff(uint x, uint y, uint data)
     //   data[17:0] - Which cores are working (bitmap)
     uint type = data >> 30;
 
-    switch (type) {
-    case 0: {
-	uint target_x = (data >> 27) & 7;
-	uint target_y = (data >> 24) & 7;
+    // blacklist info target chip 
+    uint target_x = (data >> 27) & 7;
+    uint target_y = (data >> 24) & 7;
 
+    // blacklisted cores
+    uint dead_cores = data & 0x3ffff;
+
+    switch (type) {
+    case 0:
 	// Ignore if not targeted at this chip
 	if (target_x != x || target_y != y) {
 	    return;
@@ -1088,9 +1092,6 @@ void nn_cmd_biff(uint x, uint y, uint data)
 	// disable blacklisted links
 	// NB: blacklisted links are given as '1'
 	sv->link_en = link_en = ((~data) >> 18) & 0x3f;
-
-        // remember blacklisted cores
-	uint dead_cores = data & 0x3ffff;
 
 	// if blacklisted prepare to delegate
 	if (dead_cores & (1 << sark.phys_cpu)) {
@@ -1117,7 +1118,6 @@ void nn_cmd_biff(uint x, uint y, uint data)
         // Kill blacklisted cores
 	remap_phys_cores(dead_cores);
 	break;
-    }
 
     default: // Ignore...
 	break;

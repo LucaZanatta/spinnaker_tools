@@ -1129,53 +1129,81 @@ void proc_100hz(uint a1, uint a2)
     static uint netinit_biff_tick_counter = 0;
     static uint netinit_p2p_tick_counter = 0;
 
+    uint cpsr;
+
+    int guess_x;
+    int guess_y;
+
+    int min_x;
+    int min_y;
+    int max_x;
+    int max_y;
+
+    uint p2pb_period;
+
+    // make a local copy of the current P2P address guess
+    // (it can change in a concurrent thread)
+    cpsr = cpu_int_disable();
+    guess_x = p2p_addr_guess_x;
+    guess_y = p2p_addr_guess_y;
+    cpu_int_restore(cpsr);
+
     // Boot-up related packet sending and boot-phase advancing
     switch (netinit_phase) {
     case NETINIT_PHASE_P2P_ADDR:
-	// Periodically re-send the neighbours their P2P address as
-	// neighbouring chips may take some time to come online.
-	p2pc_addr_nn_send(0, 0);
+	// Periodically re-send the neighbours my P2P address guess
+	// as neighbouring chips may take some time to come online.
+	p2pc_addr_nn_send(guess_x, guess_y);
 
 	// If no new P2P addresses have been broadcast for a while we can
-	// assume all chips are have a valid P2P address so it is now time to
+	// assume all chips have a valid P2P address so it is now time to
 	// determine the system's dimensions.
 	if (ticks_since_last_p2pc_new++ > (uint)sv->netinit_bc_wait) {
 	    netinit_phase = NETINIT_PHASE_P2P_DIMS;
 
-	    p2p_min_x = (p2p_addr_guess_x < 0) ? p2p_addr_guess_x : 0;
-	    p2p_min_y = (p2p_addr_guess_y < 0) ? p2p_addr_guess_y : 0;
-	    p2p_max_x = (p2p_addr_guess_x > 0) ? p2p_addr_guess_x : 0;
-	    p2p_max_y = (p2p_addr_guess_y > 0) ? p2p_addr_guess_y : 0;
+	    // update the current dimensions guess atomically
+	    // (it is used and can change in concurrent threads)
+	    cpsr = cpu_int_disable();
+	    p2p_min_x = (guess_x < 0) ? guess_x : 0;
+	    p2p_min_y = (guess_y < 0) ? guess_y : 0;
+	    p2p_max_x = (guess_x > 0) ? guess_x : 0;
+	    p2p_max_y = (guess_y > 0) ? guess_y : 0;
+	    cpu_int_restore(cpsr);
         }
 	break;
 
     case NETINIT_PHASE_P2P_DIMS:
-	// Periodically re-broadcast the local best guess of system
-	// dimensions as a safety net in the event of packet loss.
-	p2pc_dims_nn_send(0, 0);
-
 	// If no new guesses have been broadcast for a while we can assume
 	// the current guess is accurate so its time to move onto the next
 	// phase
 	if (ticks_since_last_p2pc_dims++ > (uint)sv->netinit_bc_wait) {
 	    // If no coordinate discovered, just shut down this chip
-	    if (p2p_addr_guess_x == NO_IDEA || p2p_addr_guess_y == NO_IDEA) {
+	    if (guess_x == NO_IDEA || guess_y == NO_IDEA) {
 		remap_phys_cores(0x3ffff);
             }
 
+	    // make a local copy of the current dimensions guess
+	    // (it can change in a concurrent thread)
+	    cpsr = cpu_int_disable();
+	    min_x = p2p_min_x;
+	    min_y = p2p_min_y;
+	    max_x = p2p_max_x;
+	    max_y = p2p_max_y;
+	    cpu_int_restore(cpsr);
+
 	    // Record the coordinates/dimensions discovered
-	    sv->p2p_addr = p2p_addr = ((p2p_addr_guess_x - p2p_min_x) << 8) |
-		    ((p2p_addr_guess_y - p2p_min_y) << 0);
-	    sv->p2p_dims = p2p_dims = ((1 + p2p_max_x - p2p_min_x) << 8) |
-		    ((1 + p2p_max_y - p2p_min_y) << 0);
-	    sv->p2p_root = p2p_root = (-p2p_min_x << 8) | -p2p_min_y;
+	    sv->p2p_addr = p2p_addr = ((guess_x - min_x) << 8) |
+		    ((guess_y - min_y) << 0);
+	    sv->p2p_dims = p2p_dims = ((1 + max_x - min_x) << 8) |
+		    ((1 + max_y - min_y) << 0);
+	    sv->p2p_root = p2p_root = (-min_x << 8) | -min_y;
 
 	    sv->p2p_active += 1;
 
 	    // Reseed uniquely for each chip
 	    sark_srand(p2p_addr);
 
-	    // Set our P2P addr in the comms controller
+	    // Set my P2P addr in the comms controller
 	    cc[CC_SAR] = 0x07000000 + p2p_addr;
 
 	    // Work out the local Ethernet connected chip coordinates
@@ -1220,10 +1248,10 @@ void proc_100hz(uint a1, uint a2)
         }
 	break;
 
-    case NETINIT_PHASE_P2P_TABLE: {
+    case NETINIT_PHASE_P2P_TABLE:
 	// Broadcast P2P table generation packets, staggered by chip to
 	// reduce network load.
-	uint p2pb_period = ((p2p_dims >> 8) * (p2p_dims & 0xFF)) * P2PB_OFFSET_USEC;
+	p2pb_period = ((p2p_dims >> 8) * (p2p_dims & 0xFF)) * P2PB_OFFSET_USEC;
 	if (netinit_p2p_tick_counter == 0) {
 	    hop_table[p2p_addr] = 0;
 	    rtr_p2p_set(p2p_addr, 7);
@@ -1259,7 +1287,6 @@ void proc_100hz(uint a1, uint a2)
 	    }
 	}
 	break;
-    }
 
     case NETINIT_PHASE_DEL:
         // delegate if boot image DMA completed
@@ -1328,6 +1355,22 @@ void proc_100hz(uint a1, uint a2)
 
 void proc_1khz(uint a1, uint a2)
 {
+    // periodically re-broadcast the current dimensions guess
+    if (netinit_phase == NETINIT_PHASE_P2P_DIMS) {
+        // make a local copy of the current dimensions guess
+        // (it can change in a concurrent thread)
+        uint cpsr = cpu_int_disable();
+	int min_x = p2p_min_x;
+	int min_y = p2p_min_y;
+	int max_x = p2p_max_x;
+	int max_y = p2p_max_y;
+	cpu_int_restore(cpsr);
+
+	// Periodically re-broadcast the local best guess of system
+	// dimensions as a safety net in the event of packet loss.
+	p2pc_dims_nn_send(min_x, min_y, max_x, max_y);
+    }
+
     // Display status on LED0 except when booting
     if (netinit_phase >= NETINIT_PHASE_DONE) {
 	if (sv->led_period == 1) {
@@ -1665,7 +1708,7 @@ void c_main(void)
 	// Reseed uniquely for each chip
 	sark_srand(p2p_addr);
 
-	// Set our P2P addr in the comms controller
+	// Set my P2P addr in the comms controller
 	cc[CC_SAR] = 0x07000000 + p2p_addr;
 
         // Initialise, as DONE, late-stage boot process variables
