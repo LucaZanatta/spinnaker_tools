@@ -1075,7 +1075,7 @@ void nn_cmd_biff(uint x, uint y, uint data)
     //   data[17:0] - Which cores are working (bitmap)
     uint type = data >> 30;
 
-    // blacklist info target chip 
+    // blacklist info target chip
     uint target_x = (data >> 27) & 7;
     uint target_y = (data >> 24) & 7;
 
