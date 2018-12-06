@@ -7,8 +7,8 @@
 extern void schedule(uchar event_id, uint arg0, uint arg1);
 
 extern uchar user_pending;
-extern uint user_arg0;
-extern uint user_arg1;
+extern volatile uint user_arg0;
+extern volatile uint user_arg1;
 
 extern uint ticks;
 
@@ -511,13 +511,17 @@ INT_HANDLER soft_int_isr()
     // Clear software interrupt in the VIC
     vic[VIC_SOFT_CLR] = (1 << SOFTWARE_INT);
 
+    // make local copies of arguments
+    uint arg0 = user_arg0;
+    uint arg1 = user_arg1;
+
+    // clear flag to allow a new user event to be queued
+    user_pending = FALSE;
+
     // If application callback registered schedule it
     if (callback[USER_EVENT].cback != NULL) {
-	schedule(USER_EVENT, user_arg0, user_arg1);
+	schedule(USER_EVENT, arg0, arg1);
     }
-
-    // Clear flag to indicate event has been serviced
-    user_pending = FALSE;
 
     // Ack VIC
     vic[VIC_VADDR] = 1;
@@ -542,11 +546,15 @@ INT_HANDLER soft_int_fiqsr()
     // Clear software interrupt in the VIC
     vic[VIC_SOFT_CLR] = (1 << SOFTWARE_INT);
 
-    // Execute preeminent callback
-    callback[USER_EVENT].cback(user_arg0, user_arg1);
+    // make local copy of arguments
+    uint arg0 = user_arg0;
+    uint arg1 = user_arg1;
 
-    // Clear flag to indicate event has been serviced
+    // clear flag to allow a new user event to be queued
     user_pending = FALSE;
+
+    // Execute preeminent callback
+    callback[USER_EVENT].cback(arg0, arg1);
 }
 /*
 *******/

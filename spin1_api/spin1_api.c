@@ -47,8 +47,8 @@ tx_packet_queue_t tx_packet_queue;
 static task_queue_t task_queue[NUM_PRIORITIES-1];  // priority <= 0 is non-queueable
 cback_t callback[NUM_EVENTS];
 uchar user_pending = FALSE;
-uint user_arg0;
-uint user_arg1;
+volatile uint user_arg0;
+volatile uint user_arg1;
 
 
 // -----------------------------------------
